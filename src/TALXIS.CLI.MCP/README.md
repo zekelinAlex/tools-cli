@@ -231,6 +231,22 @@ See `docs/mcp-http-auth-notes.md` (design notes, no code in v1).
 
 ---
 
+## MCP vs. direct CLI fallback
+
+Agents configured with both `txc-mcp` and the `txc` CLI on PATH may
+sometimes invoke `txc` directly in the terminal instead of going
+through MCP — for example when the server failed to start, when a
+tool hasn't been discovered yet via progressive disclosure, or after
+a transient runtime error. This is supported (the CLI is the source
+of truth), but it changes what auth, logging, and progress look like.
+
+See [docs/mcp-fallback.md](../../docs/mcp-fallback.md) for the
+behaviour matrix, platform-specific notes, and how to make terminal
+fallback behave like MCP by setting `TXC_NON_INTERACTIVE=1` and
+`TXC_LOG_FORMAT=json` in the agent shell.
+
+---
+
 ## Progressive Disclosure Architecture
 
 ### The Problem
