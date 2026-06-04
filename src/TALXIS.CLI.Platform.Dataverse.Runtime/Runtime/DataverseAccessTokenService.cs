@@ -2,6 +2,7 @@ using System.Security.Cryptography.X509Certificates;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Identity.Client;
+using TALXIS.CLI.Core;
 using TALXIS.CLI.Core.Abstractions;
 using TALXIS.CLI.Core.Identity;
 using TALXIS.CLI.Core.Model;
@@ -138,8 +139,8 @@ public sealed class DataverseAccessTokenService : IDataverseAccessTokenService
         if (account is null)
         {
             throw new InvalidOperationException(
-                $"No cached sign-in found for credential '{credential.Id}'. " +
-                "Run 'txc config auth login' and retry.");
+                AuthRecoveryMessage.Build(
+                    $"No cached sign-in found for credential '{credential.Id}'."));
         }
 
         try
@@ -185,8 +186,9 @@ public sealed class DataverseAccessTokenService : IDataverseAccessTokenService
             }
 
             throw new InvalidOperationException(
-                $"Cached token for '{credential.Id}' expired or is missing consent. " +
-                "Run 'txc config auth login' and retry.", ex);
+                AuthRecoveryMessage.Build(
+                    $"Cached token for '{credential.Id}' expired or is missing consent."),
+                ex);
         }
     }
 

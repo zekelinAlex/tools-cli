@@ -15,36 +15,33 @@ namespace TALXIS.CLI.MCP
 
             if (arguments != null && commandType != null)
             {
-                // Handle CliArgument (positional) in order
                 var positionalProps = GetPositionalProperties(commandType);
+                var optionProps = GetOptionProperties(commandType);
+                var consumed = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+                // Handle CliArgument (positional) in declaration order.
                 foreach (var prop in positionalProps)
                 {
-                    var name = prop.Attr?.Name ?? prop.Prop.Name;
-                    if (arguments.TryGetValue(name, out var value) && value.ValueKind != JsonValueKind.Null)
-                    {
-                        AddArgumentValues(positionalArgs, value, null);
-                    }
+                    var propName = prop.Attr?.Name ?? prop.Prop.Name;
+                    if (!TryGetCaseInsensitive(arguments, propName, out var matchedKey, out var value))
+                        continue;
+                    if (value.ValueKind == JsonValueKind.Null)
+                        continue;
+
+                    AddArgumentValues(positionalArgs, value, null);
+                    consumed.Add(matchedKey);
                 }
 
-                // Handle CliOption (named)
-                var optionProps = GetOptionProperties(commandType);
+                // Handle CliOption (named).
                 foreach (var entry in arguments)
                 {
-                    // Only add as option if not already used as positional
-                    if (positionalProps.Any(x => (x.Attr?.Name ?? x.Prop.Name) == entry.Key))
+                    if (consumed.Contains(entry.Key))
                         continue;
-                    if (entry.Value.ValueKind != JsonValueKind.Null)
-                    {
-                        // Find the property info for this option to get the correct name/casing
-                        var optionProp = optionProps.FirstOrDefault(x => (x.Attr?.Name ?? x.Prop.Name) == entry.Key);
-                        var optionName = optionProp.Attr?.Name ?? optionProp.Prop?.Name ?? entry.Key;
-                        // DotMake uses lower camelCase if no attribute name is set
-                        if (optionProp.Attr?.Name == null && optionProp.Prop != null)
-                        {
-                            optionName = char.ToLowerInvariant(optionProp.Prop.Name[0]) + optionProp.Prop.Name.Substring(1);
-                        }
-                        AddArgumentValues(optionArgs, entry.Value, $"--{optionName}=");
-                    }
+                    if (entry.Value.ValueKind == JsonValueKind.Null)
+                        continue;
+
+                    var optionName = ResolveOptionName(entry.Key, optionProps);
+                    AddArgumentValues(optionArgs, entry.Value, $"--{optionName}=");
                 }
             }
             else if (arguments != null)
@@ -63,6 +60,60 @@ namespace TALXIS.CLI.MCP
             cliArgs.AddRange(optionArgs);
             return cliArgs;
         }
+
+        private static bool TryGetCaseInsensitive(
+            IReadOnlyDictionary<string, JsonElement> arguments,
+            string targetKey,
+            out string matchedKey,
+            out JsonElement value)
+        {
+            foreach (var pair in arguments)
+            {
+                if (string.Equals(pair.Key, targetKey, StringComparison.OrdinalIgnoreCase))
+                {
+                    matchedKey = pair.Key;
+                    value = pair.Value;
+                    return true;
+                }
+            }
+            matchedKey = string.Empty;
+            value = default;
+            return false;
+        }
+
+        private static string ResolveOptionName(
+            string inputKey,
+            IReadOnlyList<(PropertyInfo Prop, DotMake.CommandLine.CliOptionAttribute? Attr)> optionProps)
+        {
+            // Try to find a matching declared option. We accept three
+            // representations interchangeably so MCP clients don't have to
+            // mirror the C# casing exactly:
+            //   - the explicit [CliOption(Name = "--xxx")] (stripped of "--")
+            //   - the C# property name as-is (PascalCase)
+            //   - the camelCase form DotMake auto-generates from PascalCase
+            // The first hit wins, case-insensitive.
+            foreach (var opt in optionProps)
+            {
+                var explicitName = opt.Attr?.Name?.TrimStart('-');
+                var propName = opt.Prop.Name;
+                var camelName = ToCamelCase(propName);
+
+                if ((explicitName is not null && string.Equals(explicitName, inputKey, StringComparison.OrdinalIgnoreCase))
+                    || string.Equals(propName, inputKey, StringComparison.OrdinalIgnoreCase)
+                    || string.Equals(camelName, inputKey, StringComparison.OrdinalIgnoreCase))
+                {
+                    return explicitName ?? camelName;
+                }
+            }
+            // Unknown key — pass through. The CLI will produce a real error
+            // rather than us silently dropping a typo'd flag.
+            return inputKey;
+        }
+
+        private static string ToCamelCase(string name)
+            => string.IsNullOrEmpty(name)
+               ? name
+               : char.ToLowerInvariant(name[0]) + name[1..];
 
         // Helper: Split tool name by underscores
         private static List<string> ParseToolName(string toolName)
@@ -134,6 +185,11 @@ namespace TALXIS.CLI.MCP
             var required = new List<string>();
             var schemaProperties = new Dictionary<string, object?>();
 
+            // A single throwaway instance lets us read field-initializer defaults
+            // (e.g. WorkspaceValidate's Path = ".") so positional args that the CLI
+            // treats as optional aren't advertised as required in the MCP schema.
+            var defaults = TryCreateInstance(commandType);
+
             // Add CliArgument (positional) properties
             foreach (var prop in properties)
             {
@@ -150,7 +206,9 @@ namespace TALXIS.CLI.MCP
                     if (itemsSchema != null)
                         schemaProp["items"] = itemsSchema;
                     schemaProperties[argName] = schemaProp;
-                    required.Add(argName);
+
+                    if (IsPositionalRequired(prop, argAttr, defaults))
+                        required.Add(argName);
                 }
             }
 
@@ -187,6 +245,50 @@ namespace TALXIS.CLI.MCP
                 ["required"] = required
             };
             return JsonSerializer.Deserialize<JsonElement>(JsonSerializer.Serialize(schema));
+        }
+
+        private static bool IsPositionalRequired(
+            PropertyInfo prop,
+            DotMake.CommandLine.CliArgumentAttribute argAttr,
+            object? defaults)
+        {
+            // Explicit opt-in always wins.
+            if (argAttr.Required)
+                return true;
+            // Nullable (string?, int?) → optional by nature.
+            if (IsNullable(prop))
+                return false;
+            // A reference-type property carrying a field-initializer default (e.g. ".")
+            // is optional — the CLI substitutes the default when the caller omits it.
+            if (!prop.PropertyType.IsValueType && defaults != null && prop.GetValue(defaults) is not null)
+                return false;
+            // Non-nullable, no detectable default → genuinely required.
+            return true;
+        }
+
+        // Helper: true when the property accepts null (Nullable<T> or a nullable reference type).
+        private static bool IsNullable(PropertyInfo prop)
+        {
+            if (Nullable.GetUnderlyingType(prop.PropertyType) != null)
+                return true;
+            var info = new NullabilityInfoContext().Create(prop);
+            return info.WriteState == NullabilityState.Nullable
+                || info.ReadState == NullabilityState.Nullable;
+        }
+
+        // Helper: best-effort instantiation just to read default property values.
+        // Command ctors only run field initializers (logger, defaults), so this is cheap;
+        // if a type can't be constructed we fall back to treating defaults as unknown.
+        private static object? TryCreateInstance(Type commandType)
+        {
+            try
+            {
+                return Activator.CreateInstance(commandType);
+            }
+            catch
+            {
+                return null;
+            }
         }
 
         // Helper: Get JSON schema type for a .NET type

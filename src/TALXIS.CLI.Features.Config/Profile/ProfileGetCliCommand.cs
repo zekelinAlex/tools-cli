@@ -24,7 +24,7 @@ public class ProfileGetCliCommand : TxcLeafCommand
     protected override ILogger Logger { get; } = TxcLoggerFactory.CreateLogger(nameof(ProfileGetCliCommand));
 
     [CliArgument(Description = "Profile name. If omitted, shows the active profile.", Required = false)]
-    public string? Name { get; set; }
+    public string? Name { get; set; } = null;
 
     protected override async Task<int> ExecuteAsync()
     {

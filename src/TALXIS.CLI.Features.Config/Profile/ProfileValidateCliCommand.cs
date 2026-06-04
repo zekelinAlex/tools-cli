@@ -33,7 +33,7 @@ public class ProfileValidateCliCommand : TxcLeafCommand
     protected override ILogger Logger { get; } = TxcLoggerFactory.CreateLogger(nameof(ProfileValidateCliCommand));
 
     [CliArgument(Description = "Profile name to validate. Defaults to the global active profile.", Required = false)]
-    public string? Name { get; set; }
+    public string? Name { get; set; } = null;
 
     [CliOption(Description = "Skip the live authenticated round-trip (WhoAmI); run structural checks only.")]
     public bool SkipLive { get; set; }

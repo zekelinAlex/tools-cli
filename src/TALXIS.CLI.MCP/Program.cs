@@ -179,8 +179,26 @@ async ValueTask<CallToolResult> CallToolAsync(RequestContext<CallToolRequestPara
     return await DispatchCliToolAsync(toolName, p, ctx, ct);
 }
 
-// Handles guide and domain-specific guide tool calls
+
 async ValueTask<CallToolResult> HandleGuideToolAsync(
+    string guideName, IDictionary<string, JsonElement>? arguments, McpServer server, CancellationToken ct)
+{
+    try
+    {
+        return await HandleGuideToolInternalAsync(guideName, arguments, server, ct);
+    }
+    catch (McpException)
+    {
+        // Already actionable — let the transport surface it as-is.
+        throw;
+    }
+    catch (Exception ex) when (ex is not OperationCanceledException || !ct.IsCancellationRequested)
+    {
+        return McpToolResultFactory.BuildErrorResult(GuideErrorMessage.Build(guideName, ex));
+    }
+}
+
+async ValueTask<CallToolResult> HandleGuideToolInternalAsync(
     string guideName, IDictionary<string, JsonElement>? arguments, McpServer server, CancellationToken ct)
 {
     var query = arguments?.TryGetValue("query", out var queryEl) == true ? queryEl.GetString() ?? "" : "";

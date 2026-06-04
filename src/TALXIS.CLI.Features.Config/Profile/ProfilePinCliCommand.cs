@@ -34,7 +34,7 @@ public class ProfilePinCliCommand : TxcLeafCommand
     protected override ILogger Logger { get; } = TxcLoggerFactory.CreateLogger(nameof(ProfilePinCliCommand));
 
     [CliArgument(Description = "Profile name to pin. Defaults to the global active profile.", Required = false)]
-    public string? Name { get; set; }
+    public string? Name { get; set; } = null;
 
     protected override async Task<int> ExecuteAsync()
     {

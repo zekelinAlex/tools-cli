@@ -82,7 +82,7 @@ public class DataPackageExportCliCommand : ProfiledCliCommand
 
         if (result.InteractiveAuthRequired)
         {
-            Logger.LogError("Interactive authentication is required. Run 'txc config auth login' for profile '{Profile}' and retry.", Profile ?? "(default)");
+            Logger.LogError("{Message}", AuthRecoveryMessage.Build("Interactive authentication is required.", Profile));
             return ExitError;
         }
 

@@ -25,8 +25,9 @@ public class EnvDataQueryFetchXmlCliCommand : ProfiledCliCommand
 {
     protected override ILogger Logger { get; } = TxcLoggerFactory.CreateLogger(nameof(EnvDataQueryFetchXmlCliCommand));
 
+    // the query can instead come from --file.
     [CliArgument(Description = "The FetchXML query string (omit if using --file).", Required = false)]
-    public string? FetchXml { get; set; }
+    public string? FetchXml { get; set; } = null;
 
     [CliOption(Name = "--file", Description = "Path to a file containing the FetchXML query.", Required = false)]
     public string? File { get; set; }
