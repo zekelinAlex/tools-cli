@@ -1,3 +1,4 @@
+using Microsoft.Crm.Sdk.Messages;
 using Microsoft.PowerPlatform.Dataverse.Client;
 using Microsoft.Xrm.Sdk;
 using Microsoft.Xrm.Sdk.Messages;
@@ -157,12 +158,26 @@ public class CrmServiceClient : ServiceClient, IDisposable
     /// Hides the base <see cref="ServiceClient.ConnectedOrgVersion"/> which
     /// returns the hardcoded default <c>9.0.0.0</c> when the token-provider
     /// constructor path is used (the SDK's <c>ExternalTokenManagement</c> path
-    /// skips <c>GetServerVersion</c>/<c>RefreshInstanceDetails</c>).
+    /// sets <c>OrganizationVersion = 9.0.0.0</c> at connect time and skips the
+    /// normal server-version discovery — see
+    /// <c>ConnectionService.cs</c> in the Dataverse SDK source).
     /// <para>
-    /// When the base property still returns 9.0.0.0 this property falls back
-    /// to <c>9.2.0.0</c> — the minimum version of any modern Power Platform
-    /// environment — so Package Deployer's <c>SolutionPackageVersion</c>
-    /// compatibility check does not reject solutions built against the 9.1 schema.
+    /// Rather than guessing a constant, this recovers the real org version
+    /// using public SDK APIs, in order of cost:
+    /// </para>
+    /// <list type="number">
+    /// <item><description>The base property, in case it is already populated.</description></item>
+    /// <item><description><see cref="ServiceClient.OrganizationDetail"/>, whose getter
+    /// triggers the SDK's internal <c>RefreshInstanceDetails</c> and is confirmed
+    /// (via live testing) to return the real version even on the
+    /// <c>ExternalTokenManagement</c> path.</description></item>
+    /// <item><description><see cref="RetrieveVersionRequest"/>, a strongly-typed
+    /// SOAP request confirmed (via live testing) to succeed and return the real
+    /// version as a last resort.</description></item>
+    /// </list>
+    /// <para>
+    /// If every mechanism still returns the SDK default, the base value is
+    /// returned as-is rather than substituting a hardcoded lie.
     /// </para>
     /// </summary>
     public new Version ConnectedOrgVersion
@@ -172,19 +187,36 @@ public class CrmServiceClient : ServiceClient, IDisposable
             if (_cachedOrgVersion != null)
                 return _cachedOrgVersion;
 
+            var sdkDefault = new Version(9, 0, 0, 0);
+
             var baseVersion = base.ConnectedOrgVersion;
-            if (baseVersion > new Version(9, 0, 0, 0))
+            if (baseVersion > sdkDefault)
+                return _cachedOrgVersion = baseVersion;
+
+            // Base returned the SDK's hardcoded default — this happens because
+            // the ExternalTokenManagement path skips server version discovery at
+            // connect time. Accessing OrganizationDetail forces the SDK to
+            // actually retrieve it.
+            if (Version.TryParse(base.OrganizationDetail?.OrganizationVersion, out var detailVersion)
+                && detailVersion > sdkDefault)
             {
-                _cachedOrgVersion = baseVersion;
-                return baseVersion;
+                return _cachedOrgVersion = detailVersion;
             }
 
-            // Base returned the SDK's hardcoded default (9.0.0.0) — this happens
-            // because the ExternalTokenManagement path skips server version discovery.
-            // All modern Power Platform environments are at least 9.2; return that
-            // so Package Deployer's SolutionPackageVersion compatibility check passes.
-            _cachedOrgVersion = new Version(9, 2, 0, 0);
-            return _cachedOrgVersion;
+            baseVersion = base.ConnectedOrgVersion;
+            if (baseVersion > sdkDefault)
+                return _cachedOrgVersion = baseVersion;
+
+            // Last resort: explicitly ask the server via a strongly-typed request.
+            if (base.Execute(new RetrieveVersionRequest()) is RetrieveVersionResponse retrieveVersionResponse
+                && Version.TryParse(retrieveVersionResponse.Version, out var requestVersion)
+                && requestVersion > sdkDefault)
+            {
+                return _cachedOrgVersion = requestVersion;
+            }
+
+            // Give up honestly rather than hardcoding a fallback constant.
+            return base.ConnectedOrgVersion;
         }
     }
 
