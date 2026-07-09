@@ -1,0 +1,14 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <!-- The runtime rejects resolver results whose simple name differs from the
+         request, so these stubs must ship as a physical System.Activities.dll. -->
+    <AssemblyName>System.Activities</AssemblyName>
+    <RootNamespace>System.Activities</RootNamespace>
+    <AssemblyVersion>4.0.0.0</AssemblyVersion>
+  </PropertyGroup>
+
+</Project>

@@ -53,6 +53,9 @@ public static class LegacyAssemblyRuntime
             StaticAssemblyMap["Microsoft.Xrm.Tooling.Connector"] = typeof(Microsoft.Xrm.Tooling.Connector.CrmServiceClient).Assembly;
             StaticAssemblyMap["System.ServiceModel"] = typeof(System.ServiceModel.FaultException).Assembly;
             StaticAssemblyMap["System.IO.Packaging"] = typeof(System.IO.Packaging.Package).Assembly;
+            // WF is absent on modern .NET; reflection-only stubs let MEF scan
+            // package assemblies that reference System.Activities.
+            StaticAssemblyMap["System.Activities"] = typeof(System.Activities.CodeActivity).Assembly;
 
             // ExportProcessor ships in the ConfigurationMigration.Wpf NuGet
             // tools/ folder and is not automatically probed by the runtime.
