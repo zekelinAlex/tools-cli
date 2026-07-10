@@ -469,10 +469,11 @@ internal sealed class ChangesetApplier : IChangesetApplier
     {
         using var conn = await DataverseCommandBridge.ConnectAsync(profileName, ct).ConfigureAwait(false);
 
+        var metadataByEntity = await RetrieveRecordMetadataAsync(conn, ops, ct).ConfigureAwait(false);
         var requests = new OrganizationRequestCollection();
         foreach (var op in ops)
         {
-            requests.Add(BuildOrganizationRequest(op));
+            requests.Add(BuildOrganizationRequest(op, metadataByEntity));
         }
 
         var response = (ExecuteMultipleResponse)await conn.Client.ExecuteAsync(
@@ -548,10 +549,11 @@ internal sealed class ChangesetApplier : IChangesetApplier
     {
         using var conn = await DataverseCommandBridge.ConnectAsync(profileName, ct).ConfigureAwait(false);
 
+        var metadataByEntity = await RetrieveRecordMetadataAsync(conn, ops, ct).ConfigureAwait(false);
         var requests = new OrganizationRequestCollection();
         foreach (var op in ops)
         {
-            requests.Add(BuildOrganizationRequest(op));
+            requests.Add(BuildOrganizationRequest(op, metadataByEntity));
         }
 
         try
@@ -605,6 +607,7 @@ internal sealed class ChangesetApplier : IChangesetApplier
         string? profileName, IReadOnlyList<StagedOperation> ops, bool continueOnError, CancellationToken ct)
     {
         using var conn = await DataverseCommandBridge.ConnectAsync(profileName, ct).ConfigureAwait(false);
+        var metadataByEntity = await RetrieveRecordMetadataAsync(conn, ops, ct).ConfigureAwait(false);
         var results = new List<OperationResult>();
 
         // Group operations by (entity, operation type) for bulk messages
@@ -633,7 +636,7 @@ internal sealed class ChangesetApplier : IChangesetApplier
                 {
                     var entities = new EntityCollection { EntityName = entityName };
                     foreach (var op in groupOps)
-                        entities.Entities.Add(BuildEntity(op));
+                        entities.Entities.Add(BuildEntity(op, metadataByEntity));
 
                     await conn.Client.ExecuteAsync(
                         new CreateMultipleRequest { Targets = entities }, ct).ConfigureAwait(false);
@@ -646,7 +649,7 @@ internal sealed class ChangesetApplier : IChangesetApplier
                 {
                     var entities = new EntityCollection { EntityName = entityName };
                     foreach (var op in groupOps)
-                        entities.Entities.Add(BuildEntity(op));
+                        entities.Entities.Add(BuildEntity(op, metadataByEntity));
 
                     await conn.Client.ExecuteAsync(
                         new UpdateMultipleRequest { Targets = entities }, ct).ConfigureAwait(false);
@@ -662,7 +665,7 @@ internal sealed class ChangesetApplier : IChangesetApplier
                     {
                         try
                         {
-                            await conn.Client.ExecuteAsync(BuildOrganizationRequest(op), ct).ConfigureAwait(false);
+                            await conn.Client.ExecuteAsync(BuildOrganizationRequest(op, metadataByEntity), ct).ConfigureAwait(false);
                             results.Add(new OperationResult(op.Index, true,
                                 $"{op.OperationType} {op.TargetType} {op.TargetDescription}"));
                         }
@@ -783,12 +786,13 @@ internal sealed class ChangesetApplier : IChangesetApplier
     /// Converts a staged data operation into the corresponding Dataverse SDK request.
     /// File uploads return <c>null</c> — they use the chunked block API and cannot be batched.
     /// </summary>
-    private static OrganizationRequest? BuildOrganizationRequest(StagedOperation op)
+    private static OrganizationRequest? BuildOrganizationRequest(
+        StagedOperation op, IReadOnlyDictionary<string, EntityMetadata>? metadataByEntity = null)
     {
         return (op.TargetType, op.OperationType) switch
         {
-            ("record", "CREATE") => new CreateRequest { Target = BuildEntity(op) },
-            ("record", "UPDATE") => new UpdateRequest { Target = BuildEntity(op) },
+            ("record", "CREATE") => new CreateRequest { Target = BuildEntity(op, metadataByEntity) },
+            ("record", "UPDATE") => new UpdateRequest { Target = BuildEntity(op, metadataByEntity) },
             ("record", "DELETE") => new DeleteRequest
             {
                 Target = new EntityReference(
@@ -830,9 +834,11 @@ internal sealed class ChangesetApplier : IChangesetApplier
     /// <summary>
     /// Builds a Dataverse <see cref="Entity"/> from a staged record operation's parameters.
     /// </summary>
-    private static Entity BuildEntity(StagedOperation op)
+    private static Entity BuildEntity(StagedOperation op, IReadOnlyDictionary<string, EntityMetadata>? metadataByEntity = null)
     {
         var entityName = op.Parameters["entity"]!.ToString()!;
+        EntityMetadata? metadata = null;
+        metadataByEntity?.TryGetValue(entityName, out metadata);
 
         // The "attributes" (or "data") parameter holds either a JsonElement or a serialized JSON string
         JsonElement attributesJson;
@@ -858,7 +864,37 @@ internal sealed class ChangesetApplier : IChangesetApplier
             recordId = Guid.Parse(idObj.ToString()!);
         }
 
-        return EntityJsonConverter.JsonToEntity(entityName, attributesJson, recordId);
+        return EntityJsonConverter.JsonToEntity(entityName, attributesJson, metadata, recordId);
+    }
+
+    /// <summary>
+    /// Fetches attribute metadata for every entity referenced by record CREATE/UPDATE
+    /// operations, so JSON values get wrapped into SDK types (OptionSetValue, Money,
+    /// EntityReference) the same way the direct record service does.
+    /// </summary>
+    private static async Task<Dictionary<string, EntityMetadata>> RetrieveRecordMetadataAsync(
+        DataverseConnection conn, IEnumerable<StagedOperation> ops, CancellationToken ct)
+    {
+        var metadataByEntity = new Dictionary<string, EntityMetadata>(StringComparer.OrdinalIgnoreCase);
+        var entityNames = ops
+            .Where(o => o.TargetType == "record" && o.OperationType is "CREATE" or "UPDATE")
+            .Select(o => o.Parameters.GetValueOrDefault("entity")?.ToString())
+            .Where(n => !string.IsNullOrEmpty(n))
+            .Distinct(StringComparer.OrdinalIgnoreCase);
+
+        foreach (var entityName in entityNames)
+        {
+            var request = new RetrieveEntityRequest
+            {
+                LogicalName = entityName,
+                EntityFilters = EntityFilters.Attributes,
+                RetrieveAsIfPublished = true
+            };
+            var response = (RetrieveEntityResponse)await conn.Client.ExecuteAsync(request, ct).ConfigureAwait(false);
+            metadataByEntity[entityName!] = response.EntityMetadata;
+        }
+
+        return metadataByEntity;
     }
 
     /// <summary>
