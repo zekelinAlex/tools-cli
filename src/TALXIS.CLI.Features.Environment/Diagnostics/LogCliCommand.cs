@@ -15,6 +15,7 @@ namespace TALXIS.CLI.Features.Environment.Diagnostics;
         typeof(LogPluginTraceCliCommand),
         typeof(LogAsyncJobsCliCommand),
         typeof(LogWorkflowCliCommand),
+        typeof(LogFlowRunsCliCommand),
     },
     ShortFormAutoGenerate = CliNameAutoGenerate.None
 )]
