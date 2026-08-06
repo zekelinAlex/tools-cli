@@ -171,4 +171,153 @@ public class ComponentInspectHelpersTests
     {
         Assert.Equal(expected, ComponentInspectHelpers.NormalizeGuid(input));
     }
+
+    private const string DialogXml = """
+        <Dialog xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+          <LocalizedNames>
+            <LocalizedName description="Objednávka doručena" languagecode="1029" />
+            <LocalizedName description="Order Delivered" languagecode="1033" />
+          </LocalizedNames>
+          <FormId>{1b68b00c-554d-4247-9665-5f9da90eca79}</FormId>
+          <UniqueName>ntg_orderdelivereddialog</UniqueName>
+          <FormXml>
+            <forms type="dialog">
+              <form>
+                <tabs>
+                  <tab id="{7c47a10e-0000-0000-0000-000000000001}" name="overview_tab">
+                    <labels><label description="Overview" languagecode="1033" /></labels>
+                    <columns><column width="100%"><sections>
+                      <section id="{7c47a10e-0000-0000-0000-000000000002}" name="informationsection">
+                        <labels><label description="Information" languagecode="1033" /></labels>
+                        <rows><row>
+                          <cell id="{7c47a10e-0000-0000-0000-000000000003}">
+                            <labels><label description="Delivery Date" languagecode="1033" /></labels>
+                            <control id="ntg_deliveredondate" classid="{5B22993F-A3C7-4e26-A56D-8C623CE58A95}" datafieldname="ntg_deliveredondate" />
+                          </cell>
+                        </row></rows>
+                      </section>
+                    </sections></column></columns>
+                  </tab>
+                </tabs>
+              </form>
+            </forms>
+          </FormXml>
+        </Dialog>
+        """;
+
+    [Fact]
+    public void ParseDialogForm_ProjectsDialogAsForm()
+    {
+        var component = new GenericComponentMetadata
+        {
+            ComponentTypeName = "Dialog",
+            Id = "{1b68b00c-554d-4247-9665-5f9da90eca79}",
+            Name = "ntg_orderdelivereddialog",
+            SerializedContent = DialogXml,
+        };
+
+        var dialog = ComponentInspectHelpers.ParseDialogForm(component);
+
+        Assert.NotNull(dialog);
+        Assert.Equal("ntg_orderdelivereddialog", dialog!.UniqueName);
+        Assert.Equal("{1b68b00c-554d-4247-9665-5f9da90eca79}", dialog.Form.FormId);
+        Assert.Equal("dialog", dialog.Form.FormType);
+
+        var result = ComponentInspectHelpers.BuildFormResult(dialog.Form, depth: null, dialog.UniqueName);
+        Assert.Equal("Order Delivered", result.DisplayName);
+        Assert.Equal("ntg_orderdelivereddialog", result.UniqueName);
+        Assert.Null(result.EntityLogicalName);
+
+        var tab = Assert.Single(result.Tabs);
+        Assert.Equal("Overview", tab.Label);
+        var control = Assert.Single(Assert.Single(tab.Sections!).Controls!);
+        Assert.Equal("ntg_deliveredondate", control.DataFieldName);
+    }
+
+    [Fact]
+    public void ParseDialogForm_ReturnsNullForNonDialogContent()
+    {
+        var component = new GenericComponentMetadata
+        {
+            ComponentTypeName = "Dialog",
+            SerializedContent = "<NotADialog />",
+        };
+
+        Assert.Null(ComponentInspectHelpers.ParseDialogForm(component));
+    }
+
+    [Fact]
+    public void BuildViewResult_ParsesColumnsOrderAndQuickFindFromSourceFile()
+    {
+        var path = Path.Combine(Path.GetTempPath(), "txc-tests", $"view-{Guid.NewGuid():N}.xml");
+        Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+        File.WriteAllText(path, """
+            <savedqueries>
+              <savedquery>
+                <isquickfindquery>1</isquickfindquery>
+                <isdefault>1</isdefault>
+                <savedqueryid>{1b800408-e8a6-4f13-9e35-a7b3b50f7921}</savedqueryid>
+                <layoutxml>
+                  <grid name="resultset" jump="ntg_name" select="1">
+                    <row name="result" id="ntg_abfproductid">
+                      <cell name="ntg_name" width="300" />
+                      <cell name="createdon" width="125" />
+                    </row>
+                  </grid>
+                </layoutxml>
+                <querytype>4</querytype>
+                <fetchxml>
+                  <fetch version="1.0" mapping="logical">
+                    <entity name="ntg_abfproduct">
+                      <attribute name="ntg_name" />
+                      <order attribute="ntg_name" descending="true" />
+                    </entity>
+                  </fetch>
+                </fetchxml>
+              </savedquery>
+            </savedqueries>
+            """);
+
+        try
+        {
+            var view = new SavedQueryMetadata
+            {
+                SavedQueryId = "{1B800408-E8A6-4F13-9E35-A7B3B50F7921}",
+                DisplayName = new Label("Quick Find Active ABF Products", 1033),
+                EntityLogicalName = "ntg_abfproduct",
+                QueryType = 4,
+                IsDefault = true,
+                Source = new SourceLocation(path, 0, 0),
+            };
+
+            var result = ComponentInspectHelpers.BuildViewResult(view);
+
+            Assert.True(result.IsQuickFindQuery);
+            Assert.Equal(2, result.Columns.Count);
+            Assert.Equal("ntg_name", result.Columns[0].Name);
+            Assert.Equal(300, result.Columns[0].Width);
+            Assert.Equal("ntg_name (desc)", Assert.Single(result.OrderBy));
+            Assert.Contains("ntg_abfproduct", result.FetchXml);
+        }
+        finally
+        {
+            File.Delete(path);
+        }
+    }
+
+    [Fact]
+    public void BuildViewResult_WithoutSourceFile_ReturnsEmptyColumns()
+    {
+        var view = new SavedQueryMetadata
+        {
+            SavedQueryId = "{1b800408-e8a6-4f13-9e35-a7b3b50f7921}",
+            EntityLogicalName = "ntg_abfproduct",
+        };
+
+        var result = ComponentInspectHelpers.BuildViewResult(view);
+
+        Assert.Empty(result.Columns);
+        Assert.Empty(result.OrderBy);
+        Assert.Null(result.FetchXml);
+    }
 }

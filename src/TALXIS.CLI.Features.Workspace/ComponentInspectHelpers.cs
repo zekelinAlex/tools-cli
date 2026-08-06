@@ -1,7 +1,9 @@
+using System.Xml.Linq;
 using TALXIS.CLI.Core;
 using TALXIS.Platform.Metadata;
 using TALXIS.Platform.Metadata.Components;
 using TALXIS.Platform.Metadata.Merging;
+using TALXIS.Platform.Metadata.Serialization.Xml;
 
 namespace TALXIS.CLI.Features.Workspace;
 
@@ -13,7 +15,7 @@ internal static class ComponentInspectHelpers
 {
     private const int EnglishLanguageCode = 1033;
 
-    public static FormInspectionResult BuildFormResult(FormMetadata form, int? depth)
+    public static FormInspectionResult BuildFormResult(FormMetadata form, int? depth, string? uniqueName = null)
     {
         var tabs = new List<FormTabNode>();
         foreach (var tab in FindDescendants(form.Body, "tab"))
@@ -63,8 +65,126 @@ internal static class ComponentInspectHelpers
             form.EntityLogicalName,
             PickLabel(form.DisplayName),
             PickLabel(form.Description),
+            uniqueName,
             tabs);
     }
+
+    /// <summary>
+    /// Parses a dialog component (Dialogs/{guid}.xml stored as a generic component) into
+    /// form metadata so dialogs can be inspected the same way as entity forms.
+    /// Returns null when the content is missing or not a dialog document.
+    /// </summary>
+    public static DialogFormInfo? ParseDialogForm(GenericComponentMetadata component)
+    {
+        if (string.IsNullOrWhiteSpace(component.SerializedContent))
+            return null;
+
+        XElement root;
+        try
+        {
+            root = XElement.Parse(component.SerializedContent);
+        }
+        catch (System.Xml.XmlException)
+        {
+            return null;
+        }
+
+        if (!string.Equals(root.Name.LocalName, "Dialog", StringComparison.OrdinalIgnoreCase))
+            return null;
+
+        var formsElement = root.Element("FormXml")?.Element("forms");
+        var formElement = formsElement?.Element("form");
+
+        var form = new FormMetadata
+        {
+            FormId = root.Element("FormId")?.Value ?? component.Id,
+            FormType = formsElement?.Attribute("type")?.Value ?? "dialog",
+            DisplayName = ParseLocalizedLabel(root.Element("LocalizedNames"), "LocalizedName"),
+            Description = ParseLocalizedLabel(root.Element("Descriptions"), "Description"),
+            Body = formElement is null ? null : MergeableNodeXmlConverter.FromXElement(formElement),
+        };
+
+        return new DialogFormInfo(form, root.Element("UniqueName")?.Value ?? component.Name);
+    }
+
+    public static ViewInspectionResult BuildViewResult(SavedQueryMetadata view)
+    {
+        // The metadata library exposes layoutxml/fetchxml as element text (empty for
+        // nested XML), so read the grid and fetch definitions from the source file.
+        var savedQuery = TryLoadSavedQueryElement(view);
+        var layout = savedQuery?.Element("layoutxml")?.Elements().FirstOrDefault();
+        var fetch = savedQuery?.Element("fetchxml")?.Elements().FirstOrDefault();
+        var isQuickFind = view.IsQuickFindQuery || savedQuery?.Element("isquickfindquery")?.Value == "1";
+
+        return new ViewInspectionResult(
+            view.SavedQueryId,
+            PickLabel(view.DisplayName),
+            view.EntityLogicalName,
+            view.QueryType,
+            view.IsDefault,
+            isQuickFind,
+            ParseLayoutColumns(layout),
+            ParseFetchOrder(fetch),
+            fetch?.ToString());
+    }
+
+    private static XElement? TryLoadSavedQueryElement(SavedQueryMetadata view)
+    {
+        var path = view.Source?.FilePath;
+        if (path is null || !File.Exists(path))
+            return null;
+
+        try
+        {
+            var queries = XDocument.Load(path).Root?.Elements("savedquery").ToList();
+            if (queries is null || queries.Count == 0)
+                return null;
+
+            var normalizedId = NormalizeGuid(view.SavedQueryId);
+            return queries.FirstOrDefault(q => NormalizeGuid(q.Element("savedqueryid")?.Value) == normalizedId)
+                ?? (queries.Count == 1 ? queries[0] : null);
+        }
+        catch (System.Xml.XmlException)
+        {
+            return null;
+        }
+    }
+
+    private static Label? ParseLocalizedLabel(XElement? container, string elementName)
+    {
+        if (container is null)
+            return null;
+
+        var labels = container.Elements(elementName)
+            .Select(e => (Text: e.Attribute("description")?.Value, Code: (int?)e.Attribute("languagecode")))
+            .Where(l => l.Text is not null)
+            .ToList();
+        if (labels.Count == 0)
+            return null;
+
+        var picked = labels.FirstOrDefault(l => l.Code == EnglishLanguageCode);
+        if (picked.Text is null)
+            picked = labels[0];
+        return new Label(picked.Text!, picked.Code ?? EnglishLanguageCode);
+    }
+
+    private static IReadOnlyList<ViewColumnNode> ParseLayoutColumns(XElement? grid)
+        => grid is null
+            ? []
+            : grid.Descendants("cell")
+                .Select(c => new ViewColumnNode(c.Attribute("name")?.Value, (int?)c.Attribute("width")))
+                .ToList();
+
+    private static IReadOnlyList<string> ParseFetchOrder(XElement? fetch)
+        => fetch is null
+            ? []
+            : fetch.Descendants("order")
+                .Select(o =>
+                {
+                    var attribute = o.Attribute("attribute")?.Value ?? "?";
+                    return (bool?)o.Attribute("descending") == true ? $"{attribute} (desc)" : attribute;
+                })
+                .ToList();
 
     public static EntityInspectionResult BuildEntityResult(EntityMetadata entity)
     {
@@ -183,10 +303,37 @@ internal static class ComponentInspectHelpers
     private static string RequiredDisplay(EntityAttributeNode attribute)
         => attribute.RequiredLevel == nameof(RequiredLevel.None) ? string.Empty : attribute.RequiredLevel;
 
+    public static void RenderViewText(ViewInspectionResult view)
+    {
+        OutputWriter.WriteLine($"View: {view.DisplayName ?? "unnamed"} {view.ViewId}");
+        var flags = (view.IsDefault ? " | default" : "") + (view.IsQuickFindQuery ? " | quick find" : "");
+        OutputWriter.WriteLine($"Entity: {view.EntityLogicalName ?? "?"} | Query type: {view.QueryType?.ToString() ?? "?"}{flags}");
+        if (view.OrderBy.Count > 0)
+            OutputWriter.WriteLine($"Order by: {string.Join(", ", view.OrderBy)}");
+        OutputWriter.WriteLine(string.Empty);
+
+        if (view.Columns.Count == 0)
+        {
+            OutputWriter.WriteLine("No columns found in layout.");
+            return;
+        }
+
+        int nameWidth = Math.Clamp(view.Columns.Max(c => c.Name?.Length ?? 0), 6, 40);
+        string header = $"{"Column".PadRight(nameWidth)} | Width";
+        OutputWriter.WriteLine(header);
+        OutputWriter.WriteLine(new string('-', header.Length));
+        foreach (var column in view.Columns)
+            OutputWriter.WriteLine($"{(column.Name ?? "?").PadRight(nameWidth)} | {column.Width?.ToString() ?? ""}");
+        OutputWriter.WriteLine($"\n{view.Columns.Count} column(s).");
+    }
+
     public static void RenderFormText(FormInspectionResult form)
     {
         OutputWriter.WriteLine($"Form: {form.DisplayName ?? "unnamed"} {form.FormId}");
-        OutputWriter.WriteLine($"Type: {form.FormType ?? "?"} | Entity: {form.EntityLogicalName ?? "?"}");
+        var origin = form.EntityLogicalName is not null
+            ? $"Entity: {form.EntityLogicalName}"
+            : $"Unique name: {form.UniqueName ?? "?"}";
+        OutputWriter.WriteLine($"Type: {form.FormType ?? "?"} | {origin}");
         OutputWriter.WriteLine(string.Empty);
 
         for (int t = 0; t < form.Tabs.Count; t++)
@@ -235,7 +382,28 @@ internal sealed record FormInspectionResult(
     string? EntityLogicalName,
     string? DisplayName,
     string? Description,
+    string? UniqueName,
     IReadOnlyList<FormTabNode> Tabs);
+
+/// <summary>A dialog parsed into form metadata plus its unique name (dialogs are not entity-bound).</summary>
+internal sealed record DialogFormInfo(
+    TALXIS.Platform.Metadata.Components.FormMetadata Form,
+    string? UniqueName);
+
+internal sealed record ViewInspectionResult(
+    string? ViewId,
+    string? DisplayName,
+    string? EntityLogicalName,
+    int? QueryType,
+    bool IsDefault,
+    bool IsQuickFindQuery,
+    IReadOnlyList<ViewColumnNode> Columns,
+    IReadOnlyList<string> OrderBy,
+    string? FetchXml);
+
+internal sealed record ViewColumnNode(
+    string? Name,
+    int? Width);
 
 internal sealed record FormTabNode(
     string? Id,

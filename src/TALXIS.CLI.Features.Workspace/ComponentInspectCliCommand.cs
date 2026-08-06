@@ -17,8 +17,8 @@ namespace TALXIS.CLI.Features.Workspace;
 [CliCommand(
     Name = "inspect",
     Description = "Inspects the internal structure of a single component in the local workspace (no environment connection). " +
-        "Forms: tab > section > control tree with data field bindings. Entities: attribute list with types and required levels. " +
-        "Identify forms by GUID or display name, entities by logical name.")]
+        "Forms (including dialogs): tab > section > control tree with data field bindings. Entities: attribute list with types and required levels. " +
+        "Views: columns, sort order and fetch query. Identify forms by GUID, display name or dialog unique name; entities by logical name; views by GUID or name.")]
 public class ComponentInspectCliCommand : TxcLeafCommand
 {
     protected override ILogger Logger { get; } = TxcLoggerFactory.CreateLogger(nameof(ComponentInspectCliCommand));
@@ -28,7 +28,7 @@ public class ComponentInspectCliCommand : TxcLeafCommand
     [CliArgument(Description = "Path inside the solution workspace (defaults to current directory).")]
     public string Path { get; set; } = ".";
 
-    [CliOption(Name = "--type", Description = "Component type to inspect: Form or Entity (aliases: SystemForm, Table).")]
+    [CliOption(Name = "--type", Description = "Component type to inspect: Form, Entity or View. Dialog forms count as Form.")]
     public required string Type { get; set; }
 
     [CliOption(Name = "--id", Description = "Component identifier - form GUID (with or without braces) or form display name for forms, entity logical name for entities.")]
@@ -55,14 +55,15 @@ public class ComponentInspectCliCommand : TxcLeafCommand
         return Type.Trim().ToLowerInvariant() switch
         {
             "entity" or "table" => Task.FromResult(InspectEntity(workspace)),
-            "form" or "systemform" => Task.FromResult(InspectForm(workspace)),
+            "form" or "systemform" or "dialog" => Task.FromResult(InspectForm(workspace)),
+            "view" or "savedquery" => Task.FromResult(InspectView(workspace)),
             _ => Task.FromResult(UnsupportedType()),
         };
     }
 
     private int UnsupportedType()
     {
-        Logger.LogError("Unsupported component type '{Type}'. Supported types: Form, Entity.", Type);
+        Logger.LogError("Unsupported component type '{Type}'. Supported types: Form, Entity, View.", Type);
         return ExitValidationError;
     }
 
@@ -87,14 +88,26 @@ public class ComponentInspectCliCommand : TxcLeafCommand
     {
         var normalizedId = ComponentInspectHelpers.NormalizeGuid(Id);
 
-        var candidates = Entity is null
-            ? workspace.Forms
-            : workspace.Forms.Where(f => string.Equals(f.EntityLogicalName, Entity, StringComparison.OrdinalIgnoreCase)).ToList();
+        var candidates = workspace.Forms.Select(f => new DialogFormInfo(f, null))
+            .Concat(workspace.GenericComponents
+                .Where(g => string.Equals(g.ComponentTypeName, "Dialog", StringComparison.OrdinalIgnoreCase))
+                .Select(ComponentInspectHelpers.ParseDialogForm)
+                .Where(d => d is not null)
+                .Select(d => d!))
+            .ToList();
+
+        if (Entity is not null)
+        {
+            candidates = candidates
+                .Where(c => string.Equals(c.Form.EntityLogicalName, Entity, StringComparison.OrdinalIgnoreCase))
+                .ToList();
+        }
 
         var matches = normalizedId is not null
-            ? candidates.Where(f => ComponentInspectHelpers.NormalizeGuid(f.FormId) == normalizedId).ToList()
-            : candidates.Where(f =>
-                string.Equals(ComponentInspectHelpers.PickLabel(f.DisplayName), Id, StringComparison.OrdinalIgnoreCase)).ToList();
+            ? candidates.Where(c => ComponentInspectHelpers.NormalizeGuid(c.Form.FormId) == normalizedId).ToList()
+            : candidates.Where(c =>
+                string.Equals(ComponentInspectHelpers.PickLabel(c.Form.DisplayName), Id, StringComparison.OrdinalIgnoreCase)
+                || string.Equals(c.UniqueName, Id, StringComparison.OrdinalIgnoreCase)).ToList();
 
         if (matches.Count == 0)
         {
@@ -110,13 +123,51 @@ public class ComponentInspectCliCommand : TxcLeafCommand
             return ExitValidationError;
         }
 
-        var result = ComponentInspectHelpers.BuildFormResult(matches[0], Depth);
+        var result = ComponentInspectHelpers.BuildFormResult(matches[0].Form, Depth, matches[0].UniqueName);
         OutputFormatter.WriteData(result, ComponentInspectHelpers.RenderFormText);
         return ExitSuccess;
     }
 
-    private static string DescribeForm(FormMetadata form)
-        => $"{form.FormId} ({ComponentInspectHelpers.PickLabel(form.DisplayName) ?? "unnamed"}, {form.EntityLogicalName})";
+    private int InspectView(MetadataWorkspace workspace)
+    {
+        var normalizedId = ComponentInspectHelpers.NormalizeGuid(Id);
+
+        var candidates = Entity is null
+            ? workspace.Views
+            : workspace.Views.Where(v => string.Equals(v.EntityLogicalName, Entity, StringComparison.OrdinalIgnoreCase)).ToList();
+
+        var matches = normalizedId is not null
+            ? candidates.Where(v => ComponentInspectHelpers.NormalizeGuid(v.SavedQueryId) == normalizedId).ToList()
+            : candidates.Where(v =>
+                string.Equals(ComponentInspectHelpers.PickLabel(v.DisplayName), Id, StringComparison.OrdinalIgnoreCase)).ToList();
+
+        if (matches.Count == 0)
+        {
+            Logger.LogError("View '{Id}' not found in workspace. Available views: {Views}.",
+                Id, Summarize(candidates.Select(DescribeView)));
+            return ExitValidationError;
+        }
+
+        if (matches.Count > 1)
+        {
+            Logger.LogError("View name '{Id}' is ambiguous ({Count} matches): {Views}. Use the view GUID or narrow with --entity.",
+                Id, matches.Count, Summarize(matches.Select(DescribeView)));
+            return ExitValidationError;
+        }
+
+        var result = ComponentInspectHelpers.BuildViewResult(matches[0]);
+        OutputFormatter.WriteData(result, ComponentInspectHelpers.RenderViewText);
+        return ExitSuccess;
+    }
+
+    private static string DescribeForm(DialogFormInfo candidate)
+    {
+        var origin = candidate.Form.EntityLogicalName ?? candidate.UniqueName ?? "dialog";
+        return $"{candidate.Form.FormId} ({ComponentInspectHelpers.PickLabel(candidate.Form.DisplayName) ?? "unnamed"}, {origin})";
+    }
+
+    private static string DescribeView(SavedQueryMetadata view)
+        => $"{view.SavedQueryId} ({ComponentInspectHelpers.PickLabel(view.DisplayName) ?? "unnamed"}, {view.EntityLogicalName})";
 
     private static string Summarize(IEnumerable<string> items)
     {
