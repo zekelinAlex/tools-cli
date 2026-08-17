@@ -1,8 +1,13 @@
+using System.Xml.Linq;
 using DotMake.CommandLine;
 using Microsoft.Extensions.Logging;
 using TALXIS.CLI.Core;
 using TALXIS.CLI.Core.Contracts.Packaging;
 using TALXIS.CLI.Logging;
+using TALXIS.Platform.Metadata.Components;
+using TALXIS.Platform.Metadata.Controls;
+using TALXIS.Platform.Metadata.Serialization.Xml;
+using TALXIS.Platform.Metadata.Serialization.Xml.Controls;
 using TALXIS.Platform.Metadata.Validation;
 
 namespace TALXIS.CLI.Features.Workspace.Controls;
@@ -112,15 +117,23 @@ public class ControlAttachCliCommand : TxcLeafCommand
         var formFile = ResolveFormFile();
         var preErrors = CountSchemaErrors(formFile);
 
-        var result = FormControlAttachmentService.Attach(new ControlAttachmentRequest
+        ControlAttachmentResult result;
+        try
         {
-            FormFilePath = formFile,
-            TargetControlId = TargetControlId,
-            Manifest = manifest,
-            ControlName = controlName,
-            Parameters = parameters,
-            Force = Force,
-        });
+            result = AttachToFormFile(formFile, new ControlAttachmentRequest
+            {
+                TargetControlId = TargetControlId,
+                Manifest = manifest,
+                ControlName = controlName,
+                Parameters = parameters,
+                Force = Force,
+            });
+        }
+        catch (InvalidOperationException ex) when (ex.Message.Contains("already attached"))
+        {
+            Logger.LogError("{Message} Use --force to replace it.", ex.Message);
+            return ExitValidationError;
+        }
 
         var postErrors = CountSchemaErrors(formFile);
         if (postErrors > preErrors)
@@ -129,6 +142,27 @@ public class ControlAttachCliCommand : TxcLeafCommand
         var action = result.ReplacedExisting ? "replaced on" : "attached to";
         OutputFormatter.WriteResult("succeeded", $"{controlName} {action} '{TargetControlId}' in {formFile}");
         return ExitSuccess;
+    }
+
+    // File-level adapter over the in-memory operation: load the form body into the
+    // metadata model, attach, and write the modified body back into the same document.
+    private static ControlAttachmentResult AttachToFormFile(string formFile, ControlAttachmentRequest request)
+    {
+        var doc = XDocument.Load(formFile);
+        var formElement = doc.Descendants("form").FirstOrDefault()
+            ?? throw new InvalidOperationException($"No <form> element in '{formFile}'.");
+
+        var form = new FormMetadata
+        {
+            FormId = doc.Root?.Element("systemform")?.Element("formid")?.Value ?? NormalizeFormFileName(formFile),
+            Body = MergeableNodeXmlConverter.FromXElement(formElement),
+        };
+
+        var result = FormControlAttachment.Attach(form, request);
+
+        formElement.ReplaceWith(MergeableNodeXmlConverter.ToXElement(form.Body!));
+        doc.Save(formFile);
+        return result;
     }
 
     private string ResolveFormFile()
