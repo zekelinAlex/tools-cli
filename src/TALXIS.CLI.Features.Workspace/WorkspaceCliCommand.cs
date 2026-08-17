@@ -1,6 +1,5 @@
 using DotMake.CommandLine;
 using TALXIS.CLI.Features.Workspace.Controls;
-using TALXIS.CLI.Features.Workspace.Entities;
 
 namespace TALXIS.CLI.Features.Workspace;
 
@@ -11,7 +10,6 @@ namespace TALXIS.CLI.Features.Workspace;
     {
         typeof(ComponentCliCommand),
         typeof(ControlCliCommand),
-        typeof(EntityCliCommand),
         typeof(ProjectCliCommand),
         typeof(WorkspaceExplainCliCommand),
         typeof(WorkspaceValidateCliCommand)
