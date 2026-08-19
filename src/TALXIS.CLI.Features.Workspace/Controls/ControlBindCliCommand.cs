@@ -96,9 +96,10 @@ public class ControlBindCliCommand : TxcLeafCommand
 
     private int BindFromManifest(string manifestSource)
     {
-        var manifest = ControlManifestReader.Read(manifestSource);
+        var control = CustomControlReader.Read(manifestSource);
+        var manifest = control.Manifest;
 
-        var controlName = ControlName ?? manifest.PrefixedName;
+        var controlName = ControlName ?? control.Name;
         if (string.IsNullOrEmpty(controlName))
         {
             Logger.LogError("The publisher-prefixed control name could not be resolved from '{Manifest}'. Pass it explicitly with --control-name (e.g. talxis_{Qualified}).", manifestSource, manifest.QualifiedName);
